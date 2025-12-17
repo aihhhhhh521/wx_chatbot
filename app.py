@@ -3,12 +3,14 @@ import time
 from fastapi import FastAPI, Request, Response
 from lxml import etree
 import requests
+import traceback
+import re
 
 app = FastAPI()
 
 WECHAT_TOKEN = "521aihjyhybaihhhhhh"
 OLLAMA_URL = "http://127.0.0.1:11434/api/chat"
-OLLAMA_MODEL = "deepseek-r1"
+OLLAMA_MODEL = "deepseek-r1:1.5b"
 
 
 def check_signature(signature: str, timestamp: str, nonce: str) -> bool:
@@ -29,8 +31,26 @@ def build_text_reply(to_user: str, from_user: str, content: str) -> str:
 </xml>"""
 
 
+def strip_think(text: str) -> str:
+    if not text:
+        return ""
+    # 1) 去掉 <think>...</think>
+    text = re.sub(r"(?is)<think>.*?</think>", "", text)
+
+    # 2) 去掉一些常见“推理/思考”前缀行（可选，但很实用）
+    text = re.sub(r"(?im)^\s*(思考|推理过程|Thought|Reasoning)\s*[:：].*$", "", text)
+
+    # 3) 清理多余空行
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    return text
+
+
 def call_ollama(user_text: str, style_system: str = "") -> str:
-    system_prompt = "你是公众号里的智能助理，回答要清晰、简洁、可执行。"
+    system_prompt = (
+        "你是公众号里的智能助理，回答要清晰、简洁、可执行。\n"
+        "【硬性要求】禁止输出任何思考过程/推理草稿/chain-of-thought；"
+        "不要输出 <think>...</think> 或类似内容；只输出最终给用户看的答案。"
+    )
     if style_system:
         system_prompt += f"\n【风格要求】\n{style_system}\n"
 
@@ -40,12 +60,18 @@ def call_ollama(user_text: str, style_system: str = "") -> str:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_text},
         ],
-        "stream": False
+        "stream": False,
     }
-    # 被动回复建议 <5 秒内返回，否则微信可能重试。:contentReference[oaicite:2]{index=2}
-    r = requests.post(OLLAMA_URL, json=payload, timeout=4.5)
+
+    r = requests.post(OLLAMA_URL, json=payload, timeout=7.5)
     r.raise_for_status()
-    return r.json()["message"]["content"].strip()
+
+    raw = (r.json().get("message", {}).get("content", "") or "").strip()
+    cleaned = strip_think(raw)
+
+    # 避免清洗后为空导致用户看到空消息
+    return cleaned if cleaned else "我已生成回复，但内容被过滤为空。你可以换个更具体的问法。"
+
 
 
 @app.get("/wx")
@@ -81,8 +107,9 @@ async def wx_message(request: Request):
 
     try:
         answer = call_ollama(user_text, style_system="")
-    except Exception:
-        # 兜底：避免卡死导致微信重试
+    except Exception as e:
+        print("OLLAMA ERROR:", repr(e))
+        traceback.print_exc()
         answer = "我这边刚刚没算出来，你再发一次我就能接上。"
 
     reply = build_text_reply(from_user, to_user, answer)
