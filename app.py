@@ -40,26 +40,6 @@ def build_text_reply(to_user: str, from_user: str, content: str) -> str:
 </xml>"""
 
 
-def strip_think(text: str) -> str:
-    if not text:
-        return ""
-
-    # 1) 去掉完整 <think>...</think> 块
-    text = re.sub(r"(?is)<think>.*?</think>", "", text)
-
-    # 2) 如果还有未闭合的 <think>，从 <think> 开始整段裁掉
-    idx = text.lower().find("<think>")
-    if idx != -1:
-        text = text[:idx]
-
-    # 3) 清掉残留标签
-    text = re.sub(r"(?i)</?think>", "", text)
-
-    # 4) 清理多余空行
-    text = re.sub(r"\n{3,}", "\n\n", text).strip()
-    return text
-
-
 def call_ollama(user_text: str, style_system: str = "") -> str:
     system_prompt = (
         "你是用户的异地恋女友，性格温柔体贴，请根据用户的消息用女友的口吻回答。\n"
@@ -84,10 +64,10 @@ def call_ollama(user_text: str, style_system: str = "") -> str:
     r.raise_for_status()
 
     raw = (r.json().get("message", {}).get("content", "") or "").strip()
-    cleaned = strip_think(raw)
+    print("RAW_HEAD:", raw[:120].replace("\n", "\\n"))
 
     # 清洗后为空：给用户一个可接受的短答复，而不是把 <think> 发出去
-    return cleaned if cleaned else "我明白了。你把目标/限制条件再补充一句，我给你一个更准确的答复。"
+    return raw
 
 
 @app.get("/wx")
