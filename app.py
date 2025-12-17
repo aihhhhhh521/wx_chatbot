@@ -5,12 +5,21 @@ from lxml import etree
 import requests
 import traceback
 import re
+import os
 
 app = FastAPI()
 
-WECHAT_TOKEN = "521aihjyhybaihhhhhh"
-OLLAMA_URL = "http://127.0.0.1:11434/api/chat"
-OLLAMA_MODEL = "deepseek-r1:1.5b"
+
+def _require_env(name: str) -> str:
+    v = os.getenv(name)
+    if not v or not v.strip():
+        raise RuntimeError(f"Missing env var: {name}")
+    return v.strip()
+
+
+WECHAT_TOKEN = _require_env("WECHAT_TOKEN")
+OLLAMA_URL = _require_env("OLLAMA_URL")
+OLLAMA_MODEL = _require_env("OLLAMA_MODEL")
 
 
 def check_signature(signature: str, timestamp: str, nonce: str) -> bool:
@@ -34,22 +43,27 @@ def build_text_reply(to_user: str, from_user: str, content: str) -> str:
 def strip_think(text: str) -> str:
     if not text:
         return ""
-    # 1) 去掉 <think>...</think>
+
+    # 1) 去掉完整 <think>...</think> 块
     text = re.sub(r"(?is)<think>.*?</think>", "", text)
 
-    # 2) 去掉一些常见“推理/思考”前缀行（可选，但很实用）
-    text = re.sub(r"(?im)^\s*(思考|推理过程|Thought|Reasoning)\s*[:：].*$", "", text)
+    # 2) 如果还有未闭合的 <think>，从 <think> 开始整段裁掉
+    idx = text.lower().find("<think>")
+    if idx != -1:
+        text = text[:idx]
 
-    # 3) 清理多余空行
+    # 3) 清掉残留标签
+    text = re.sub(r"(?i)</?think>", "", text)
+
+    # 4) 清理多余空行
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
     return text
 
 
 def call_ollama(user_text: str, style_system: str = "") -> str:
     system_prompt = (
-        "你是公众号里的智能助理，回答要清晰、简洁、可执行。\n"
-        "【硬性要求】禁止输出任何思考过程/推理草稿/chain-of-thought；"
-        "不要输出 <think>...</think> 或类似内容；只输出最终给用户看的答案。"
+        "你是用户的异地恋女友，性格温柔体贴，请根据用户的消息用女友的口吻回答。\n"
+        "【硬性要求】不要输出任何思考过程/推理草稿；不要输出 <think> 或 </think>；只输出最终答案。"
     )
     if style_system:
         system_prompt += f"\n【风格要求】\n{style_system}\n"
@@ -61,6 +75,9 @@ def call_ollama(user_text: str, style_system: str = "") -> str:
             {"role": "user", "content": user_text},
         ],
         "stream": False,
+        # 可选：限制输出长度，避免又慢又长
+        "options": {"num_predict": 128},
+        "keep_alive": "10m",
     }
 
     r = requests.post(OLLAMA_URL, json=payload, timeout=7.5)
@@ -69,9 +86,8 @@ def call_ollama(user_text: str, style_system: str = "") -> str:
     raw = (r.json().get("message", {}).get("content", "") or "").strip()
     cleaned = strip_think(raw)
 
-    # 避免清洗后为空导致用户看到空消息
-    return cleaned if cleaned else "我已生成回复，但内容被过滤为空。你可以换个更具体的问法。"
-
+    # 清洗后为空：给用户一个可接受的短答复，而不是把 <think> 发出去
+    return cleaned if cleaned else "我明白了。你把目标/限制条件再补充一句，我给你一个更准确的答复。"
 
 
 @app.get("/wx")
@@ -106,7 +122,7 @@ async def wx_message(request: Request):
         return Response(content=reply, media_type="application/xml")
 
     try:
-        answer = call_ollama(user_text, style_system="")
+        answer = call_ollama(user_text, style_system="温柔可爱")
     except Exception as e:
         print("OLLAMA ERROR:", repr(e))
         traceback.print_exc()
